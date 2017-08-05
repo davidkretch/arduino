@@ -16,6 +16,7 @@
 //--------------------------------------------------------------------------
 
 #include <Wire.h>
+#include "glcdfont.c"        // From the Adafruit_GFX library
 
 #define I2C_ADDR 0x74        // I2C address of Charlieplex matrix
 #define WIDTH      16        // Matrix size in pixels
@@ -24,8 +25,8 @@
 uint8_t img[WIDTH * HEIGHT], // 8-bit buffer for image rendering
         bitmap[((WIDTH+7)/8) * HEIGHT], // 1-bit buffer for some modes
         gamma8[256],         // Gamma correction (brightness) table
-        page  = 0,           // Double-buffering front/back control
-        frame = 0;           // Frame counter used by some animation modes
+        page  = 0;           // Double-buffering front/back control
+uint16_t frame = 0;          // Frame counter used by some animation modes
 // More globals later, above code for each animation, and before setup()
 
 
@@ -61,7 +62,7 @@ uint8_t bitmapGetPixel(int8_t x, int8_t y) {
 // meant to suggest "program loading" or similar busy effect.
 
 void cursorLoop() {
-  img[0] = (frame & 1) * 255;
+  img[1 + WIDTH] = (frame & 1) * 255;
 }
 
 
@@ -212,6 +213,103 @@ void lifeLoop() {
 }
 
 
+// WAVES -------------------------------------------------------------------
+
+// The lookup table to make the brightness changes be more visible
+uint8_t sweep[24];
+
+void waveSetup() {
+  float brightness[] = {1, 2, 3, 4, 6, 8, 10, 15, 20, 30, 40, 60, 60, 40, 30, 20, 15, 10, 8, 6, 4, 3, 2, 1};
+
+  // Fix the wave sweep lookup table to account for gamma correction
+  for (uint8_t i = 0; i < 24; i++)
+    sweep[i] = (uint8_t)ceil(pow((brightness[i] - 0.5)/255.0, 1.0 / GAMMA) * 255.0);
+}
+
+void waveLoop() {
+  // Animate over all the pixels, and set the brightness from the sweep table
+  for (uint8_t x = 0; x < WIDTH; x++)
+    for (uint8_t y = 0; y < HEIGHT; y++)
+      img[x + y * WIDTH] = sweep[(x + (uint16_t)((float)frame / 4.0) * y + frame) % 24];
+}
+
+
+// TEXT --------------------------------------------------------------------
+
+// Glyph width and height
+#define GL_WIDTH 5
+#define GL_HEIGHT 8
+
+// Draw a single pixel at (x, y)
+void drawPixel(uint8_t x, int16_t y, int16_t color) {
+  if (x < 0 | x >= WIDTH | y < 0 | y >= HEIGHT)
+    return;
+  else
+    img[x + y * WIDTH] = color;
+}
+
+// Draw a character glyph at (x, y)
+uint8_t drawChar(unsigned char c, int16_t x, int16_t y) {
+
+  bool glyph[GL_WIDTH * GL_HEIGHT] = {false};
+
+  // The left and right boundaries of the glyph, found after getting the glyph
+  uint8_t x_min = GL_WIDTH - 1,
+          x_max = 0;
+
+  // Get the character glyph
+  for (uint8_t i = 0; i < GL_WIDTH; ++i) {
+    uint8_t line = pgm_read_byte(&font[c * GL_WIDTH + i]);
+    for (uint8_t j = 0; j < GL_HEIGHT; ++j, line >>= 1) {
+      bool pixel = line & 1;
+      glyph[i + j * GL_WIDTH] = pixel;
+      if (pixel) {
+        if (i < x_min) x_min = i;
+        if (i > x_max) x_max = i;
+      }
+    }
+  }
+
+  // Draw the character glyph
+  for (uint8_t i = x_min; i <= x_max; ++i) {
+    for (uint8_t j = 0; j < GL_HEIGHT; ++j) {
+       uint8_t color = glyph[i + j * GL_WIDTH] ? 100 : 0;
+       drawPixel(i + x, j + y, color);
+    }
+  }
+  
+  // Calculate the width of the glyph
+  // Check for spaces (glyphs that have no pixels)
+  int8_t width = x_max - x_min + 1;
+  if (width <= 0) width = 3;
+  
+  return width;
+}
+
+// Clear the display
+void clear() {
+  for (uint8_t i = 0; i < WIDTH * HEIGHT; ++i) {
+    img[i] = 0;
+  }
+}
+
+// Draw a character string at (x, y)
+void drawString(const char* s, uint8_t len, int16_t x, int16_t y) {
+  clear();
+  for (uint8_t i = 0; i < len; ++i) {
+    uint8_t width = drawChar(s[i], x, y);
+    x += width + 1;
+  }
+}
+
+void textLoop() {
+  const char s[] = "Elizabeth + Rachel";
+  const int16_t len = strlen(s);
+  int16_t x = WIDTH - frame % (len * GL_WIDTH + 2 * WIDTH);
+  drawString(s, len, x, 1);
+}
+
+
 // MORE GLOBAL STUFF - ANIMATION STATES ------------------------------------
 
 struct { // For each of the animation modes...
@@ -224,11 +322,13 @@ struct { // For each of the animation modes...
   typingSetup, typingLoop, 15, 15,
   lifeSetup  , lifeLoop  , 12, 30,
   matrixSetup, matrixLoop, 15, 10,
+  waveSetup  , waveLoop,   12, 24,
+  NULL       , textLoop,    6, 20
 };
 
-uint8_t  seq[] = { 0, 1, 0, 2, 0, 3 }, // Sequence of animation modes
-         idx   = sizeof(seq) - 1;      // Current position in seq[]
-uint32_t modeStartTime = 0x7FFFFFFF;   // micros() when current mode started
+uint8_t  seq[] = { 0, 1, 0, 2, 0, 3, 0, 4, 0, 5 }, // Sequence of animation modes
+         idx   = sizeof(seq) - 1;            // Current position in seq[]
+uint32_t modeStartTime = 0x7FFFFFFF;         // micros() when current mode started
 
 
 // SETUP - RUNS ONCE AT PROGRAM START --------------------------------------
